@@ -623,6 +623,9 @@ class ObituaryNewsroom(MaiBotPlugin):
         # 最近一次真实会话 ID：模型调工具时常把 stream_id 编成 "current"，
         # 那时用它兜底。
         self._last_stream_id: str = ""
+        # 会话 -> 平台 映射：工具/API 入口拿不到 platform，
+        # 只能靠命令入口记下的这一份反查，才能让三个入口的守卫行为一致。
+        self._stream_platform: Dict[str, str] = {}
 
     # ── 生命周期 ──
 
@@ -943,6 +946,10 @@ class ObituaryNewsroom(MaiBotPlugin):
         real_stream = self._sanitize_stream_id(stream_id)
         if real_stream:
             self._last_stream_id = real_stream
+            # 顺手记住这个会话属于哪个平台，供工具/API 入口反查。
+            normalized_platform = str(platform or "").strip().lower()
+            if normalized_platform:
+                self._stream_platform[real_stream] = normalized_platform
 
         groups = matched_groups if isinstance(matched_groups, dict) else {}
         raw_material = str(groups.get("material") or "").strip()
@@ -1101,9 +1108,16 @@ class ObituaryNewsroom(MaiBotPlugin):
                 "content": "拿不到当前会话 ID，没法发送。请让用户直接发命令 /新闻三要素 <素材>。",
             }
 
-        # 禁用的聊天流同样不响应（工具这条路拿不到 platform，只能按会话 ID 拦）。
+        # 禁用的聊天流同样不响应。
         if stream_id in set(self.config.plugin.blocked_stream_ids):
             return {"success": False, "content": "当前聊天流已禁用，未生成。"}
+
+        # 平台限制：工具拿不到 platform，靠命令入口记下的「会话 -> 平台」反查。
+        # 查不到（例如该会话从没跑过本插件命令）时按放行处理，
+        # 避免因为缺乏信息就拒绝正常请求。
+        platform_ok = self._platform_allowed_for_stream(stream_id)
+        if platform_ok is False:
+            return {"success": False, "content": "当前平台未启用，未生成。"}
 
         wait = self._cooldown_remaining(stream_id)
         if wait > 0:
@@ -1142,6 +1156,11 @@ class ObituaryNewsroom(MaiBotPlugin):
 
         if not self.config.plugin.enabled:
             return {"success": False, "text": "", "stream_id": stream_id}
+
+        # 传了 stream_id 就按它反查平台；没传则无从判断，直接放行。
+        if str(stream_id or "").strip():
+            if self._platform_allowed_for_stream(stream_id) is False:
+                return {"success": False, "text": "", "stream_id": stream_id}
 
         material = str(material or "").strip()
         if not material:
@@ -2384,6 +2403,22 @@ class ObituaryNewsroom(MaiBotPlugin):
             elif segment_type == "at" and isinstance(data, dict):
                 chunks.append(f"@{data.get('target_user_nickname') or ''}")
         return "".join(chunks).strip()
+
+    def _platform_allowed_for_stream(self, stream_id: str) -> Optional[bool]:
+        """按会话 ID 反查平台并判断是否允许。
+
+        工具与 API 入口拿不到 ``platform``，只能靠命令入口记下的映射。
+        查不到该会话的平台时返回 ``None``，表示「无法判断」，由调用方决定如何处理。
+        """
+
+        allowed = [str(item).strip().lower() for item in self.config.plugin.only_platforms if str(item).strip()]
+        if not allowed:
+            # 没配置平台限制，等价于全平台放行。
+            return True
+        platform = self._stream_platform.get(str(stream_id or "").strip())
+        if not platform:
+            return None
+        return platform in allowed
 
     def _platform_allowed(self, platform: str) -> bool:
         allowed = [str(item).strip().lower() for item in self.config.plugin.only_platforms if str(item).strip()]

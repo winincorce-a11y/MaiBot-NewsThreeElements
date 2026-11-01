@@ -1506,8 +1506,79 @@ async def main() -> int:
     assert sent_all(ctx59), "正常情况应发送"
     print("[59] 启用状态下工具正常出稿 OK（守卫未误伤）")
 
+
+    # ── 60. 平台限制：三个入口行为一致（第二次审核点出的唯一不一致） ──
+    art60 = (
+        "某地发生事故，救援已展开，周边群众疏散至安全区域，现场秩序正逐步恢复。"
+        "值得注意的是，据通报，维亚切斯拉夫·巴兰尼科夫在一线抢险中身亡；"
+        "安东·尤丁采夫在处置过程中离世；尼基塔·布亚诺夫突发疾病不治。"
+    )
+    SID60 = "c58628a91bab2b87117e274bd85f05fa"
+
+    cfg60 = plugin.get_default_config()
+    cfg60["plugin"]["only_platforms"] = ["qq"]
+    ctx60 = build_ctx(FakeLLM(art60))
+    plugin60 = make_plugin(module, ctx60)
+    plugin60.set_plugin_config(cfg60)
+
+    # 命令入口：qq 放行
+    ok60, _, _ = await plugin60.handle_news_command(**{
+        "text": "/新闻三要素 某地事故", "stream_id": SID60, "platform": "qq",
+        "matched_groups": {"material": "某地事故"}, "message": {}, "user_id": "u",
+        "is_local_operator": False, "plugin_config": {},
+    })
+    assert ok60, "qq 平台应放行"
+    # 命令入口应记下「会话 -> 平台」
+    assert plugin60._stream_platform.get(SID60) == "qq", (
+        f"应记录会话所属平台：{plugin60._stream_platform}"
+    )
+    assert plugin60._platform_allowed_for_stream(SID60) is True
+    print("[60] 命令入口记录会话平台 OK")
+
+    # 工具入口：同一会话应继承 qq 的放行结果
+    # （先清掉冷却记录，否则会被节流挡住，测不到平台判定）
+    plugin60._last_call.pop(SID60, None)
+    r60 = await plugin60.handle_tool_write_news(stream_id=SID60, material="某地事故")
+    assert r60["success"], f"工具入口应随会话继承平台判定：{r60}"
+    print("[61] 工具入口继承会话平台判定 OK")
+
+    # 若该会话属于未允许的平台，工具也应拒绝
+    cfg62 = plugin.get_default_config()
+    cfg62["plugin"]["only_platforms"] = ["qq"]
+    ctx62 = build_ctx(FakeLLM(art60))
+    plugin62 = make_plugin(module, ctx62)
+    plugin62.set_plugin_config(cfg62)
+    plugin62._stream_platform["telegram_stream_abc123"] = "telegram"
+    r62 = await plugin62.handle_tool_write_news(
+        stream_id="telegram_stream_abc123", material="某地事故"
+    )
+    assert not r62["success"], f"未允许的平台应被拒绝：{r62}"
+    assert "平台" in r62["content"], f"应说明平台未启用：{r62['content'][:40]!r}"
+    assert not sent_all(ctx62), "未允许平台不应发送"
+    print("[62] 工具入口拒绝未启用平台 OK")
+
+    # API 同理
+    r63 = await plugin62.api_generate_news("某地事故", stream_id="telegram_stream_abc123")
+    assert not r63["success"], f"API 也应拒绝未启用平台：{r63}"
+    # 没传 stream_id 时无从判断，放行
+    r64 = await plugin62.api_generate_news("某地事故")
+    assert r64["success"], f"未传 stream_id 时应放行：{r64}"
+    print("[63] API 入口平台限制与放行 OK")
+
+    # 未配置平台限制时，三个入口都放行
+    cfg65 = plugin.get_default_config()
+    ctx65 = build_ctx(FakeLLM(art60))
+    plugin65 = make_plugin(module, ctx65)
+    plugin65.set_plugin_config(cfg65)
+    plugin65._last_stream_id = SID60
+    assert plugin65._platform_allowed_for_stream(SID60) is True, "未配置限制应放行"
+    r65 = await plugin65.handle_tool_write_news(stream_id=SID60, material="某地事故")
+    assert r65["success"]
+    print("[64] 未配置平台限制时全放行 OK")
+
     print("\n全部自检通过 ✅")
     return 0
+
 
 
 
