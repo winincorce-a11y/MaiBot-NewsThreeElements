@@ -1,0 +1,48 @@
+{
+  "manifest_version": 2,
+  "id": "github.winincorce-a11y.news-three-elements",
+  "version": "1.23.0",
+  "name": "新闻三要素",
+  "description": "把一段素材改写成新闻体短讯，并把指定人物的死讯自然织进报道；支持自定义名单、引用取素材、按用户设置署名社名与开头。纯属玩梗，与现实无关。",
+  "author": {
+    "name": "winincorce-a11y",
+    "url": "https://github.com/winincorce-a11y"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/winincorce-a11y/MaiBot-NewsThreeElements",
+    "homepage": "https://github.com/winincorce-a11y/MaiBot-NewsThreeElements",
+    "documentation": "https://github.com/winincorce-a11y/MaiBot-NewsThreeElements/blob/main/README.md",
+    "issues": "https://github.com/winincorce-a11y/MaiBot-NewsThreeElements/issues"
+  },
+  "host_application": {
+    "min_version": "1.3.13",
+    "max_version": "1.3.99"
+  },
+  "sdk": {
+    "min_version": "2.7.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "llm.generate",
+    "send.text",
+    "send.forward",
+    "message.get_by_id"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  },
+  "display": {
+    "icon": {
+      "type": "lucide",
+      "value": "newspaper",
+      "fallback": "puzzle",
+      "background": "#1C272C"
+    }
+  },
+  "plugin_type": "creative"
+}
