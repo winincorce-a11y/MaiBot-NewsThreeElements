@@ -1,5 +1,27 @@
 # 更新日志
 
+## [1.23.3] - 2026-11-02
+
+### 新增（插件图标）
+
+- 新增插件图标 `assets/icon.webp`（64×64），取自三人并排的迷彩合影，
+  裁掉两侧黑边后居中取正方形，并略微提亮与加对比，保证小尺寸下仍可辨认。
+- `_manifest.json` 的 `display.icon` 改为 `local` 类型：
+
+  ```json
+  "display": {
+    "icon": {
+      "type": "local",
+      "value": "assets/icon.webp",
+      "fallback": "newspaper",
+      "background": "#1C272C"
+    }
+  }
+  ```
+
+  插件中心的工作流会从仓库抓取该文件，缩放到 64×64 后存入 `icons/<plugin_id>.webp`。
+  抓取失败时回落到 `newspaper` 图标。
+
 ## [1.23.2] - 2026-11-01
 
 ### 修复（第二次审核指出的最后一处入口不一致）
