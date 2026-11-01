@@ -1457,8 +1457,58 @@ async def main() -> int:
     assert plugin55._agency_for_user("99999") == "老格式报"
     print("[56] 旧版存储格式（纯字符串）兼容 OK")
 
+
+    # ── 57. 工具与 API 入口也要遵守启停/禁用流（审核建议） ──
+    art57 = (
+        "某地发生事故，救援已展开，周边群众疏散至安全区域，现场秩序正逐步恢复。"
+        "值得注意的是，据通报，维亚切斯拉夫·巴兰尼科夫在一线抢险中身亡；"
+        "安东·尤丁采夫在处置过程中离世；尼基塔·布亚诺夫突发疾病不治。"
+    )
+    SID57 = "c58628a91bab2b87117e274bd85f05fa"
+
+    # 停用后，工具不应出稿
+    cfg57 = plugin.get_default_config()
+    cfg57["plugin"]["enabled"] = False
+    ctx57 = build_ctx(FakeLLM(art57))
+    plugin57 = make_plugin(module, ctx57)
+    plugin57.set_plugin_config(cfg57)
+    plugin57._last_stream_id = SID57
+    r57 = await plugin57.handle_tool_write_news(material="某地事故")
+    assert not r57["success"], f"停用后工具不该成功：{r57}"
+    assert "停用" in r57["content"], f"应说明插件已停用：{r57['content'][:40]!r}"
+    assert not sent_all(ctx57), "停用后不应发送任何消息"
+
+    r57b = await plugin57.api_generate_news("某地事故")
+    assert not r57b["success"], f"停用后 API 也不该出稿：{r57b}"
+    print("[57] 插件停用后工具与 API 均不出稿 OK")
+
+    # 禁用的聊天流，工具也不应出稿
+    cfg58 = plugin.get_default_config()
+    cfg58["plugin"]["blocked_stream_ids"] = [SID57]
+    ctx58 = build_ctx(FakeLLM(art57))
+    plugin58 = make_plugin(module, ctx58)
+    plugin58.set_plugin_config(cfg58)
+    plugin58._last_stream_id = SID57
+    r58 = await plugin58.handle_tool_write_news(material="某地事故")
+    assert not r58["success"], f"禁用流不该成功：{r58}"
+    assert "禁用" in r58["content"], f"应说明聊天流已禁用：{r58['content'][:40]!r}"
+    assert not sent_all(ctx58), "禁用流不应发送"
+    print("[58] 禁用的聊天流下工具不出稿 OK")
+
+    # 启用状态 + 正常流，工具应正常出稿（确认守卫没误伤）
+    cfg59 = plugin.get_default_config()
+    ctx59 = build_ctx(FakeLLM(art57))
+    plugin59 = make_plugin(module, ctx59)
+    plugin59.set_plugin_config(cfg59)
+    plugin59._last_stream_id = SID57
+    r59 = await plugin59.handle_tool_write_news(material="某地事故")
+    assert r59["success"], f"正常情况应成功：{r59}"
+    assert sent_all(ctx59), "正常情况应发送"
+    print("[59] 启用状态下工具正常出稿 OK（守卫未误伤）")
+
     print("\n全部自检通过 ✅")
     return 0
+
 
 
 

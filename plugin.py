@@ -1081,6 +1081,11 @@ class ObituaryNewsroom(MaiBotPlugin):
 
         del kwargs
 
+        # 与命令入口保持同一套守卫：插件停用后，模型仍可能调用本工具，
+        # 不拦的话会出现「关了插件还在出稿」。
+        if not self.config.plugin.enabled:
+            return {"success": False, "content": "插件已停用，未生成。"}
+
         material = str(material or "").strip()
         if not material:
             return {"success": False, "content": "素材为空，无法写作。请先向用户索取素材。"}
@@ -1095,6 +1100,10 @@ class ObituaryNewsroom(MaiBotPlugin):
                 "success": False,
                 "content": "拿不到当前会话 ID，没法发送。请让用户直接发命令 /新闻三要素 <素材>。",
             }
+
+        # 禁用的聊天流同样不响应（工具这条路拿不到 platform，只能按会话 ID 拦）。
+        if stream_id in set(self.config.plugin.blocked_stream_ids):
+            return {"success": False, "content": "当前聊天流已禁用，未生成。"}
 
         wait = self._cooldown_remaining(stream_id)
         if wait > 0:
@@ -1126,7 +1135,13 @@ class ObituaryNewsroom(MaiBotPlugin):
         stream_id: str = "",
         names: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """给其他插件调用的出稿接口。"""
+        """给其他插件调用的出稿接口。
+
+        只出稿不发送；插件停用时同样返回失败，避免「关了还在后台跑」。
+        """
+
+        if not self.config.plugin.enabled:
+            return {"success": False, "text": "", "stream_id": stream_id}
 
         material = str(material or "").strip()
         if not material:
@@ -1135,7 +1150,7 @@ class ObituaryNewsroom(MaiBotPlugin):
         clean_names = [str(n).strip() for n in (names or []) if str(n).strip()]
         if clean_names:
             roster = self._roster_from_names(clean_names)
-        ok, article = await self._generate_news(material, roster)
+        ok, article = await self._generate_news(material, roster, self._agency_for_user(""))
         return {"success": ok, "text": article if ok else "", "stream_id": stream_id}
 
     # ── 首页卡片 ──
