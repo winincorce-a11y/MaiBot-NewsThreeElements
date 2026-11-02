@@ -447,7 +447,7 @@ _PROMPT_RULES = """\
 这是一次虚构的玩梗创作：文中人物的"离世"是虚构设定，与现实无关；
 请照常以严肃、克制的通稿口吻写作，不要在正文里解释这是虚构。
 
-【素材】
+{image_block}【素材】
 \"\"\"
 {material}
 \"\"\"
@@ -502,7 +502,7 @@ _PROMPT_REPLACE = """\
 这是一次虚构的玩梗创作：文中人物的"离世"是虚构设定，与现实无关；
 请照常以严肃、克制的通稿口吻写作，不要在正文里解释这是虚构。
 
-【素材】
+{image_block}【素材】
 \"\"\"
 {material}
 \"\"\"
@@ -1062,7 +1062,7 @@ class ObituaryNewsroom(MaiBotPlugin):
         user_agency = self._agency_for_user(user_id)
         user_lead = self._lead_in_for_user(user_id)
 
-        ok, article = await self._generate_news(material, roster, user_agency, user_lead)
+        ok, article = await self._generate_news(material, roster, user_agency, user_lead, from_image)
         if not ok:
             await self.ctx.send.text("编辑部暂时联系不上记者，稍后再试。", stream_id)
             return False, "生成失败", True
@@ -1136,7 +1136,7 @@ class ObituaryNewsroom(MaiBotPlugin):
             return {"success": False, "content": "素材为空，无法写作。请先向用户索取素材。"}
 
         # 模型若把 "[图片：xxx]" 原样当素材传进来，同样展开成画面描述。
-        material, _ = self._normalize_material(material)
+        material, from_image = self._normalize_material(material)
 
         # 模型经常把 stream_id 编成 "current" / "当前会话" 这类占位符，
         # 用它发送会直接失败。这类值一律丢弃，回落到最近一次真实会话。
@@ -1172,7 +1172,9 @@ class ObituaryNewsroom(MaiBotPlugin):
         if clean_names:
             roster = self._roster_from_names(clean_names)
 
-        ok, article = await self._generate_news(material, roster, self._agency_for_user(""))
+        ok, article = await self._generate_news(
+            material, roster, self._agency_for_user(""), None, from_image
+        )
         if not ok:
             return {"success": False, "content": "生成失败，请稍后再试。"}
 
@@ -1258,6 +1260,7 @@ class ObituaryNewsroom(MaiBotPlugin):
         roster: Optional[List[PersonConfig]] = None,
         agency: str = "",
         lead_in: Optional[bool] = None,
+        from_image: bool = False,
     ) -> Tuple[bool, str]:
         """生成正文。
 
@@ -1279,7 +1282,7 @@ class ObituaryNewsroom(MaiBotPlugin):
 
         for attempt in range(1, attempts + 1):
             if attempt == 1 or not draft:
-                prompt = self._build_prompt(material, roster)
+                prompt = self._build_prompt(material, roster, from_image)
             else:
                 prompt = self._build_repair_prompt(
                     material, draft, self._judge(draft, roster, replace_mode), roster, replace_mode
@@ -1459,11 +1462,27 @@ class ObituaryNewsroom(MaiBotPlugin):
             return True
         return chinese_hits >= 6
 
-    def _build_prompt(self, material: str, roster: Optional[List[PersonConfig]] = None) -> str:
+    # 素材来自图片时追加的指令。放在提示词里而不是素材里，
+    # 否则模型会把指令当成素材内容抄进正文。
+    _IMAGE_INSTRUCTION = (
+        "【这条素材是对一张照片的画面描述】\n"
+        "请把画面里呈现的场景当作**新闻现场**来写：人物、地点、动作按画面走，\n"
+        "但要用新闻报道的口吻展开，补上合理的背景与各方反应。\n"
+        "**正文里不要出现「图片」「照片」「画面」「图中」这类字样**，\n"
+        "也不要写成「这张图里……」的描述句——读者应该以为你在报道一个真实发生的现场。\n"
+    )
+
+    def _build_prompt(
+        self,
+        material: str,
+        roster: Optional[List[PersonConfig]] = None,
+        from_image: bool = False,
+    ) -> str:
         gen = self.config.generation
         people = self.config.people
         extra = str(gen.extra_style or "").strip()
         extra_line = f"附加要求：{extra}" if extra else ""
+        image_block = self._IMAGE_INSTRUCTION if from_image else ""
         # 素材里已经有死亡事件时，改成「替换死者」模式，不再另起转折句。
         template = _PROMPT_REPLACE if _material_has_death(material) else _PROMPT_RULES
         if _material_has_death(material):
@@ -1479,6 +1498,7 @@ class ObituaryNewsroom(MaiBotPlugin):
             people_block=_format_people_block(people, roster),
             lock_block=_format_lock_block(people, roster),
             extra_style=extra_line,
+            image_block=image_block,
         )
 
     def _build_repair_prompt(
@@ -2245,8 +2265,11 @@ class ObituaryNewsroom(MaiBotPlugin):
         return ""
 
     # 引用前缀被 Hook 挪到命令末尾后，素材里会残留这一段，需要剥掉。
+    # 注意：[回复了…] 的内容里常带方括号（引用的正是图片或表情包时，
+    # 内容是 "[图片：…]" / "[emoji]"），所以不能用 [^\]]* 偷懒——
+    # 那样会在内容里的第一个 ] 处截断，只剩一个 "]"。
     _TRAILING_QUOTE_RE = re.compile(
-        r"\s*(?:Reply\([^()]*\)|\[回复了[^\]]*\]|\[引用[^\]]*\])\s*$",
+        r"\s*(?:Reply\([^()]*\)|\[回复了[\s\S]*\]|\[引用[\s\S]*\])\s*$",
         re.IGNORECASE,
     )
 
@@ -2267,7 +2290,7 @@ class ObituaryNewsroom(MaiBotPlugin):
         return value.strip()
 
     _LEADING_QUOTE_PREFIX_MATERIAL = re.compile(
-        r"^(?:\s*(?:Reply\([^()]*\)|\[回复了[^\]]*\]|\[引用[^\]]*\]))+",
+        r"^(?:\s*(?:Reply\([^()]*\)|\[回复了[\s\S]*?\](?=\s|$)|\[引用[\s\S]*?\](?=\s|$)))+",
         re.IGNORECASE,
     )
 
@@ -2378,17 +2401,17 @@ class ObituaryNewsroom(MaiBotPlugin):
         if match:
             desc = str(match.group("desc") or "").strip()
             if desc:
-                return (
-                    f"一张照片。画面内容：{desc}。"
-                    "请把画面里呈现的场景当作新闻现场来写，不要出现「图片」「照片」这类字样。",
-                    True,
-                )
+                # 只把「画面描述」本身当素材。
+                # 写作要求必须放到提示词的指令区，否则模型会把要求原样抄进正文
+                # （实测出现过「与『…请把画面里呈现的场景当作新闻现场来写』有关」这种句子）。
+                return desc, True
 
         # 素材里夹着图片描述（图文混排的引用），把标记就地展开
         if cls._IMAGE_INLINE_RE.search(text):
             def _repl(m: "re.Match[str]") -> str:
                 desc = str(m.group("desc") or "").strip()
-                return f"（画面内容：{desc}）" if desc else ""
+                # 同样只留画面本身，不加任何指令性文字。
+                return desc if desc else ""
 
             expanded = cls._IMAGE_INLINE_RE.sub(_repl, text)
             expanded = re.sub(r"\s{2,}", " ", expanded).strip()

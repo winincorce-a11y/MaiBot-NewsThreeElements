@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "github.winincorce-a11y.news-three-elements",
-  "version": "1.24.1",
+  "version": "1.24.2",
   "name": "新闻三要素",
   "description": "把素材或图片改写成新闻体短讯，并把指定人物的死讯自然织进报道；支持自定义名单、引用文字/图片取素材、按用户设置署名社名与开头。纯属玩梗，与现实无关。",
   "author": {

@@ -1589,8 +1589,13 @@ async def main() -> int:
     for raw, want_img in img_cases:
         out, is_img = plugin._normalize_material(raw)
         assert is_img is want_img, f"图片识别错误：{raw!r} -> {is_img}"
+        # 素材只保留画面描述本身，任何指令性文字都不能混进来——
+        # 否则模型会把指令原样抄进正文。
         assert "[图片" not in out and "[表情包" not in out, f"展开后不应残留标记：{out!r}"
-        assert "画面内容" in out, f"展开后应说明画面内容：{out!r}"
+        assert "请把画面" not in out and "不要出现" not in out, (
+            f"素材里不该混入写作指令：{out!r}"
+        )
+        assert out and len(out) > 2, f"展开后应留有画面描述：{out!r}"
 
     # 普通方括号素材不能被误判
     for plain in ["[新闻] 某地发生事故", "【公告】服务器维护", "美国大选", "（张三，李四）"]:
@@ -1601,9 +1606,9 @@ async def main() -> int:
     # 图文混排：就地展开
     mixed = "看到这一幕 [图片：一只橘猫趴在键盘上] 大家都笑了"
     out_mixed, is_mixed = plugin._normalize_material(mixed)
-    assert is_mixed and "画面内容" in out_mixed and "[图片" not in out_mixed, (
-        f"混排展开失败：{out_mixed!r}"
-    )
+    assert is_mixed and "[图片" not in out_mixed, f"混排展开失败：{out_mixed!r}"
+    assert "一只橘猫趴在键盘上" in out_mixed, f"混排应保留画面描述：{out_mixed!r}"
+    assert "看到这一幕" in out_mixed, f"混排应保留原有文字：{out_mixed!r}"
     print("[65] 图片素材识别与展开 OK")
 
     # ── 66. 引用图片 + 命令：端到端出稿 ──
@@ -1640,8 +1645,13 @@ async def main() -> int:
     prompt66 = llm66.prompts[0]
     # 画面内容进了提示词，且没有残留 [图片：…] 的壳
     assert "橘猫趴在键盘上" in prompt66, "图片描述没进提示词"
-    assert "画面内容" in prompt66, "应展开为画面描述"
     assert "[图片：" not in prompt66, f"不该把图片标记原样喂给模型：{prompt66[:200]!r}"
+    # 图片场景的指令应在提示词的指令区出现，且不能出现在素材块里
+    assert "这条素材是对一张照片的画面描述" in prompt66, "应给出图片场景指令"
+    material_block = prompt66.split("【素材】")[1].split("【硬性要求】")[0]
+    assert "这条素材是对一张照片的画面描述" not in material_block, (
+        f"指令不该混进素材块：{material_block[:120]!r}"
+    )
     print("[66] 引用图片 + 命令 端到端 OK")
 
     # ── 67. 引用图片 + 名单：两者可同时用 ──
