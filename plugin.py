@@ -974,6 +974,26 @@ class ObituaryNewsroom(MaiBotPlugin):
             if cleaned != material:
                 material = cleaned
 
+        # 诊断：把 entry 阶段拿到的东西记下来，排查「引用图片却写成别的内容」时用。
+        log_debug = getattr(self.ctx.logger, "debug", None)
+        if callable(log_debug):
+            log_debug(
+                "命令素材溯源：text=%r raw_segments=%s material=%r names=%s",
+                str(text or "")[:200],
+                [
+                    {
+                        "type": s.get("type"),
+                        "content": str((s.get("data") or {}).get("target_message_content") or "")[:80]
+                        if isinstance(s.get("data"), dict)
+                        else "",
+                    }
+                    for s in ((message or {}).get("raw_message") or [])
+                    if isinstance(s, dict)
+                ],
+                material[:120],
+                names,
+            )
+
         # 素材为空时，按可信度取引用正文：
         #   1) message.raw_message 的 reply 段（最接近原始数据）
         #   2) 命令文本里的 Reply(...) 前缀（可能是被截断的预览）
@@ -1003,6 +1023,19 @@ class ObituaryNewsroom(MaiBotPlugin):
         material, from_image = self._normalize_material(material)
         if from_image:
             self.ctx.logger.info("素材来自图片，已展开为画面描述（长度=%s）", len(material))
+
+        # 空壳素材（例如表情包只给了 "[emoji]"）没有可写内容，写出来必然是编的。
+        # 与其硬编一篇对不上的新闻，不如说清楚原因。
+        # 注意：完全没给素材（裸命令）走下面的帮助分支，不在这里拦。
+        if material and not names and self._is_empty_shell(material):
+            self.ctx.logger.warning("素材为空壳标记，拒绝出稿：%r", material[:60])
+            await self.ctx.send.text(
+                "这张图我没能读取出画面内容（宿主只给了空标记，通常是表情包或识别没跑完），"
+                "硬写会变成瞎编。\n"
+                "可以试试：换一张图，或直接把素材打出来 —— /新闻三要素 <素材>",
+                self._sanitize_stream_id(stream_id) or stream_id,
+            )
+            return True, "图片无可读内容", True
 
         # 帮助/重写这类裸命令要能穿过冷却，否则连说明都拿不到。
         if material in _HELP_TOKENS:
@@ -2295,6 +2328,34 @@ class ObituaryNewsroom(MaiBotPlugin):
     _IMAGE_INLINE_RE = re.compile(
         r"[\[【]\s*(?:图片|图像|照片|表情包)\s*[:：]\s*(?P<desc>[^\]】]+)\s*[\]】]"
     )
+
+    # 只有标记、没有实际内容的空壳（宿主识别失败或未做视觉识别时会这样）
+    _EMPTY_SHELL_RE = re.compile(
+        r"^\s*[\[【［(（]?\s*"
+        r"(?:emoji|image|img|图片|图像|照片|表情包|动图|视频|语音|file|文件)"
+        r"\s*[\]】］)）]?\s*$",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_empty_shell(cls, material: str) -> bool:
+        """素材是否只是个空壳标记（没有任何可写的内容）。
+
+        宿主对表情包通常只写 ``[emoji]`` / ``[表情包]``，
+        既没有画面描述也没有标签，这种素材拿去写只会让模型凭空编。
+        """
+
+        text = str(material or "").strip()
+        if not text:
+            return True
+        # 先剥掉引用前缀，再看剩下的是不是纯标记
+        stripped = cls._strip_quote_prefix(text)
+        if not stripped:
+            return True
+        if cls._EMPTY_SHELL_RE.match(stripped):
+            return True
+        # "[表情包: 呆萌,可爱]" 这种带标签的，虽然不能当画面用，但至少有语义
+        return False
 
     @classmethod
     def _normalize_material(cls, material: str) -> Tuple[str, bool]:

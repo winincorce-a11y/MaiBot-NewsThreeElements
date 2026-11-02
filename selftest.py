@@ -1677,8 +1677,74 @@ async def main() -> int:
     assert got68b == "昨晚空调坏了", f"普通引用提取错误：{got68b!r}"
     print("[68] 嵌套方括号的引用提取 OK")
 
+
+    # ── 69. 空壳素材拦截（宿主只给了 "[emoji]" 时不该硬编） ──
+    # 真实事故：引用一张表情包发命令，宿主把它识别成 EMOJI 且 vlm_processed=0，
+    # processed_plain_text 只有 "[emoji]"，插件拿不到任何画面信息，模型只能凭空编。
+    shell_cases = ["[emoji]", "[表情包]", "[image]", "[图片]", "[动图]", "emoji", "［表情包］"]
+    for raw in shell_cases:
+        assert plugin._is_empty_shell(raw), f"应识别为空壳：{raw!r}"
+
+    # 有实际内容的都不算空壳
+    content_cases = [
+        "[图片：一只橘猫趴在键盘上]",
+        "[表情包: 呆萌,可爱,卖萌]",
+        "美国大选",
+        "昨晚空调坏了",
+    ]
+    for raw in content_cases:
+        assert not plugin._is_empty_shell(raw), f"不该判为空壳：{raw!r}"
+
+    # 端到端：空壳素材应给出提示，而不是硬编一篇
+    llm69 = FakeLLM("这段不该被用上")
+    ctx69 = build_ctx(llm69)
+    plugin69 = make_plugin(module, ctx69)
+    _msg69 = {
+        "raw_message": [
+            {"type": "reply", "data": {"target_message_id": "1", "target_message_content": "[emoji]"}},
+        ],
+    }
+    ok69, _, _ = await plugin69.handle_news_command(**{
+        "text": "/新闻三要素",
+        "stream_id": "c58628a91bab2b87117e274bd85f05fa",
+        "platform": "qq",
+        "matched_groups": {"material": ""},
+        "message": _msg69,
+        "user_id": "u",
+        "is_local_operator": False,
+        "plugin_config": {},
+    })
+    assert ok69
+    assert sent_all(ctx69), "应给出提示"
+    tip = sent_body(ctx69)
+    assert "没能读取出画面内容" in tip or "瞎编" in tip, f"应说明取不到画面：{tip[:60]!r}"
+    assert not llm69.prompts, f"空壳素材不该调用模型硬编：{len(llm69.prompts)} 次"
+    print("[69] 空壳素材拦截 OK（不调用模型，直接说明原因）")
+
+    # 但「空壳 + 自定义名单」仍允许：用户可能只想要名单效果
+    llm70 = FakeLLM(
+        "某地发生事故，救援已展开，周边群众疏散至安全区域，现场秩序正逐步恢复。"
+        "值得注意的是，据通报，张三在一线抢险中身亡；李四在处置过程中离世。"
+    )
+    ctx70 = build_ctx(llm70)
+    plugin70 = make_plugin(module, ctx70)
+    ok70, _, _ = await plugin70.handle_news_command(**{
+        "text": "/新闻三要素 （张三，李四）",
+        "stream_id": "1a8eaba25d74b54702ecc69805c231e7",
+        "platform": "qq",
+        "matched_groups": {"material": ""},
+        "message": {"raw_message": [{"type": "reply", "data": {"target_message_content": "[emoji]"}}]},
+        "user_id": "u",
+        "is_local_operator": False,
+        "plugin_config": {},
+    })
+    assert ok70
+    assert llm70.prompts, "带名单时应照常生成"
+    print("[70] 空壳 + 自定义名单仍可出稿 OK")
+
     print("\n全部自检通过 ✅")
     return 0
+
 
 
 
