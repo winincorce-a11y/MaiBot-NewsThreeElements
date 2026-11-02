@@ -2401,35 +2401,8 @@ class ObituaryNewsroom(MaiBotPlugin):
     async def _image_description_by_hash(self, image_hash: str) -> str:
         """按图片 hash 查 images 表拿画面描述。"""
 
-        value = str(image_hash or "").strip()
-        if not value:
-            return ""
-        query = getattr(self.ctx.db, "query", None)
-        if not callable(query):
-            return ""
-        try:
-            result = await query(
-                model_name="Images",
-                query_type="get",
-                filters={"image_hash": value},
-                limit=1,
-                single_result=True,
-            )
-        except Exception as exc:
-            self.ctx.logger.warning("按 hash 查图片描述失败：%s", exc)
-            return ""
-        if not isinstance(result, dict):
-            return ""
-        candidates = result.get("data") or result.get("result") or []
-        if isinstance(candidates, dict):
-            candidates = [candidates]
-        for item in candidates if isinstance(candidates, list) else []:
-            if not isinstance(item, dict):
-                continue
-            desc = str(item.get("description") or "").strip()
-            if desc:
-                return desc
-        return ""
+        record = await self._image_record_by_hash(image_hash)
+        return str(record.get("description") or "").strip() if record else ""
 
     async def _image_record_by_hash(self, image_hash: str) -> Dict[str, Any]:
         """按 hash 取整条 images 记录（含 image_type）。"""
@@ -2451,12 +2424,22 @@ class ObituaryNewsroom(MaiBotPlugin):
         except Exception as exc:
             self.ctx.logger.warning("按 hash 查图片记录失败：%s", exc)
             return {}
-        if not isinstance(result, dict):
-            return {}
-        candidates = result.get("data") or result.get("result") or {}
-        if isinstance(candidates, list):
-            candidates = candidates[0] if candidates else {}
-        return candidates if isinstance(candidates, dict) else {}
+        # 宿主 database.query 直接返回查询结果本身，**没有** {"success":..., "data":...} 包装
+        # （见 capabilities/data.py 的 _cap_database_query：直接 return result）。
+        # single_result=True 时是一个 dict 或 None。
+        if isinstance(result, dict):
+            # 有些版本可能仍包了一层，兼容之。
+            if set(result.keys()) <= {"success", "data", "result", "error"} and (
+                "data" in result or "result" in result
+            ):
+                inner = result.get("data") or result.get("result") or {}
+                if isinstance(inner, list):
+                    inner = inner[0] if inner else {}
+                return inner if isinstance(inner, dict) else {}
+            return result
+        if isinstance(result, list):
+            return result[0] if result and isinstance(result[0], dict) else {}
+        return {}
 
     async def _recover_image_material(self, message: Any, stream_id: str) -> str:
         """引用图片但正文为空时，从 images 表把描述补回来。"""

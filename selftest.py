@@ -1760,9 +1760,11 @@ async def main() -> int:
         def __init__(self, mapping): self.mapping = mapping
         async def query(self, model_name, query_type="get", filters=None, limit=None,
                         single_result=False):
+            # 宿主 database.query 直接返回结果本身（single_result=True 时是 dict 或 None），
+            # 没有 {"success":..., "data":...} 包装。
             h = (filters or {}).get("image_hash", "")
             desc = self.mapping.get(h, "")
-            return {"success": True, "data": {"description": desc} if desc else None}
+            return {"description": desc, "image_type": "IMAGE"} if desc else None
 
     class _FakeMsgWithHash:
         def __init__(self, mapping): self.mapping = mapping
