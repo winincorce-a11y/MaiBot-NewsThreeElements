@@ -1576,8 +1576,110 @@ async def main() -> int:
     assert r65["success"]
     print("[64] 未配置平台限制时全放行 OK")
 
+
+    # ── 65. 图片素材识别与展开 ──
+    # 宿主把图片转成 "[图片：xxx]" 塞进文本；引用图片当素材时要先展开成可写的现场描述，
+    # 否则模型会把 "[图片：…]" 这层壳原样写进新闻。
+    img_cases = [
+        ("[图片：一只橘猫趴在键盘上]", True),
+        ("[【图片：会议室里人们围着白板】]", True),
+        ("[表情包：熊猫头大笑]", True),
+        ("[image: a cat on a keyboard]", True),
+    ]
+    for raw, want_img in img_cases:
+        out, is_img = plugin._normalize_material(raw)
+        assert is_img is want_img, f"图片识别错误：{raw!r} -> {is_img}"
+        assert "[图片" not in out and "[表情包" not in out, f"展开后不应残留标记：{out!r}"
+        assert "画面内容" in out, f"展开后应说明画面内容：{out!r}"
+
+    # 普通方括号素材不能被误判
+    for plain in ["[新闻] 某地发生事故", "【公告】服务器维护", "美国大选", "（张三，李四）"]:
+        out, is_img = plugin._normalize_material(plain)
+        assert not is_img, f"不该误判为图片：{plain!r}"
+        assert out == plain, f"普通素材不应被改写：{plain!r} -> {out!r}"
+
+    # 图文混排：就地展开
+    mixed = "看到这一幕 [图片：一只橘猫趴在键盘上] 大家都笑了"
+    out_mixed, is_mixed = plugin._normalize_material(mixed)
+    assert is_mixed and "画面内容" in out_mixed and "[图片" not in out_mixed, (
+        f"混排展开失败：{out_mixed!r}"
+    )
+    print("[65] 图片素材识别与展开 OK")
+
+    # ── 66. 引用图片 + 命令：端到端出稿 ──
+    art66 = (
+        "某地一家公司的办公室里，一只橘猫跳上工位趴在键盘上，导致正在处理的文件被误改，"
+        "同事发现后将其抱离，工作随即恢复。值得注意的是，据通报，"
+        "维亚切斯拉夫·巴兰尼科夫在驱赶时被猫抓伤后感染身亡；"
+        "安东·尤丁采夫在搬运主机时触电离世；尼基塔·布亚诺夫突发疾病不治。"
+    )
+    llm66 = FakeLLM(art66)
+    ctx66 = build_ctx(llm66)
+    plugin66 = make_plugin(module, ctx66)
+    _msg66 = {
+        "raw_message": [
+            {"type": "reply", "data": {
+                "target_message_id": "1",
+                "target_message_content": "[图片：一只橘猫趴在键盘上，旁边有半杯咖啡]",
+            }},
+        ],
+    }
+    ok66, reason66, _ = await plugin66.handle_news_command(**{
+        "text": "/新闻三要素",
+        "stream_id": "c58628a91bab2b87117e274bd85f05fa",
+        "platform": "qq",
+        "matched_groups": {"material": ""},
+        "message": _msg66,
+        "user_id": "u",
+        "is_local_operator": False,
+        "plugin_config": {},
+    })
+    assert ok66, f"引用图片+命令应成功：{reason66}"
+    assert sent_all(ctx66), "应发出正文"
+    assert llm66.prompts, "应调用模型"
+    prompt66 = llm66.prompts[0]
+    # 画面内容进了提示词，且没有残留 [图片：…] 的壳
+    assert "橘猫趴在键盘上" in prompt66, "图片描述没进提示词"
+    assert "画面内容" in prompt66, "应展开为画面描述"
+    assert "[图片：" not in prompt66, f"不该把图片标记原样喂给模型：{prompt66[:200]!r}"
+    print("[66] 引用图片 + 命令 端到端 OK")
+
+    # ── 67. 引用图片 + 名单：两者可同时用 ──
+    llm67 = FakeLLM(
+        "某地办公室发生意外，一只橘猫跳上工位导致文件被误改，随后被同事抱离，"
+        "工作秩序恢复正常。值得注意的是，据通报，张三在处置中身亡；"
+        "李四在搬运设备时遇难。"
+    )
+    ctx67 = build_ctx(llm67)
+    plugin67 = make_plugin(module, ctx67)
+    ok67, reason67, _ = await plugin67.handle_news_command(**{
+        "text": "/新闻三要素 （张三，李四）",
+        "stream_id": "1a8eaba25d74b54702ecc69805c231e7",
+        "platform": "qq",
+        "matched_groups": {"material": ""},
+        "message": _msg66,
+        "user_id": "u",
+        "is_local_operator": False,
+        "plugin_config": {},
+    })
+    assert ok67, f"引用图片+名单应成功：{reason67}"
+    p67 = llm67.prompts[0]
+    assert "橘猫趴在键盘上" in p67, "图片描述应进提示词"
+    assert "张三" in p67 and "李四" in p67, "名单应生效"
+    print("[67] 引用图片 + 自定义名单 OK")
+
+    # ── 68. 括号内含方括号时，引用提取不截断 ──
+    got68 = plugin._quoted_text_from_command(
+        "[回复了小王的图片: [图片：一只橘猫趴在键盘上]]"
+    )
+    assert got68 == "[图片：一只橘猫趴在键盘上]", f"嵌套方括号提取错误：{got68!r}"
+    got68b = plugin._quoted_text_from_command("[回复了小王的旧消息: 昨晚空调坏了]")
+    assert got68b == "昨晚空调坏了", f"普通引用提取错误：{got68b!r}"
+    print("[68] 嵌套方括号的引用提取 OK")
+
     print("\n全部自检通过 ✅")
     return 0
+
 
 
 

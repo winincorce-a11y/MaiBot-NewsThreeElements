@@ -999,6 +999,11 @@ class ObituaryNewsroom(MaiBotPlugin):
             )
             return True, "引用内容无文字", True
 
+        # 素材可能是引用图片得到的「[图片：xxx]」，先展开成可写的现场描述。
+        material, from_image = self._normalize_material(material)
+        if from_image:
+            self.ctx.logger.info("素材来自图片，已展开为画面描述（长度=%s）", len(material))
+
         # 帮助/重写这类裸命令要能穿过冷却，否则连说明都拿不到。
         if material in _HELP_TOKENS:
             await self.ctx.send.text(self._help_text(), stream_id)
@@ -1096,6 +1101,9 @@ class ObituaryNewsroom(MaiBotPlugin):
         material = str(material or "").strip()
         if not material:
             return {"success": False, "content": "素材为空，无法写作。请先向用户索取素材。"}
+
+        # 模型若把 "[图片：xxx]" 原样当素材传进来，同样展开成画面描述。
+        material, _ = self._normalize_material(material)
 
         # 模型经常把 stream_id 编成 "current" / "当前会话" 这类占位符，
         # 用它发送会直接失败。这类值一律丢弃，回落到最近一次真实会话。
@@ -2164,7 +2172,8 @@ class ObituaryNewsroom(MaiBotPlugin):
     # 从 ``Reply(...)`` 里抠 target_content；
     # 引用时宿主把引用段拼成了这段结构化文本。
     _REPLY_CONTENT_RE = re.compile(r"target_content=(?P<q>['\"])(?P<content>.*?)\1", re.S)
-    _BRACKET_QUOTE_RE = re.compile(r"\[回复了[^\]：:]*[：:]\s*(?P<content>.+?)\]", re.S)
+    # 采到真正的结尾括号为止：被引用的图片内容里可能还套着 "[图片：xxx]"
+    _BRACKET_QUOTE_RE = re.compile(r"\[回复了[^\]：:]*[：:]\s*(?P<content>[\s\S]+)\]\s*(?:$|[/／])", re.S)
 
     @classmethod
     def _quoted_text_from_command(cls, text: str) -> str:
@@ -2276,6 +2285,56 @@ class ObituaryNewsroom(MaiBotPlugin):
         # 只有括号、没有素材时也返回名单（素材为空），
         # 让「引用消息 + 只给名单」这种用法能从引用里取素材。
         return material, names
+
+    # 宿主把图片转成 "[图片：xxx]" / "[表情包：xxx]" 塞进文本，
+    # 引用图片当素材时会带这层壳。下面两个正则用来认出它。
+    _IMAGE_MATERIAL_RE = re.compile(
+        r"^\s*[\[【]\s*(?:图片|图像|照片|表情包|image|img)\s*[:：]\s*(?P<desc>.+?)\s*[\]】]\s*$",
+        re.IGNORECASE | re.DOTALL,
+    )
+    _IMAGE_INLINE_RE = re.compile(
+        r"[\[【]\s*(?:图片|图像|照片|表情包)\s*[:：]\s*(?P<desc>[^\]】]+)\s*[\]】]"
+    )
+
+    @classmethod
+    def _normalize_material(cls, material: str) -> Tuple[str, bool]:
+        """把「图片素材」展开成可写的事件描述。
+
+        引用一张图片发命令时，素材实际是 ``[图片：一只橘猫趴在键盘上]``。
+        直接把这段壳塞进新闻会很怪，所以这里剥掉外层标记，
+        并补一句"据画面显示"之类的引导语，让模型按"看到了一张图"来写，
+        而不是把它当成有人说过的一句话。
+
+        Returns:
+            Tuple[str, bool]: ``(处理后的素材, 是否来自图片)``。
+        """
+
+        text = str(material or "").strip()
+        if not text:
+            return "", False
+
+        match = cls._IMAGE_MATERIAL_RE.match(text)
+        if match:
+            desc = str(match.group("desc") or "").strip()
+            if desc:
+                return (
+                    f"一张照片。画面内容：{desc}。"
+                    "请把画面里呈现的场景当作新闻现场来写，不要出现「图片」「照片」这类字样。",
+                    True,
+                )
+
+        # 素材里夹着图片描述（图文混排的引用），把标记就地展开
+        if cls._IMAGE_INLINE_RE.search(text):
+            def _repl(m: "re.Match[str]") -> str:
+                desc = str(m.group("desc") or "").strip()
+                return f"（画面内容：{desc}）" if desc else ""
+
+            expanded = cls._IMAGE_INLINE_RE.sub(_repl, text)
+            expanded = re.sub(r"\s{2,}", " ", expanded).strip()
+            if expanded and expanded != text:
+                return expanded, True
+
+        return text, False
 
     def _roster_from_names(self, names: List[str]) -> List[PersonConfig]:
         """按命令里给的人名造临时名单；能对上配置的沿用其身份设定。"""
