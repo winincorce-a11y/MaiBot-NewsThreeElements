@@ -626,6 +626,9 @@ class ObituaryNewsroom(MaiBotPlugin):
         # 会话 -> 平台 映射：工具/API 入口拿不到 platform，
         # 只能靠命令入口记下的这一份反查，才能让三个入口的守卫行为一致。
         self._stream_platform: Dict[str, str] = {}
+        # 最近一次素材的图片类型："" / "image" / "emoji"。
+        # 用来在拼提示词时选择对应的指令段。
+        self._last_material_kind: str = ""
 
     # ── 生命周期 ──
 
@@ -1022,7 +1025,11 @@ class ObituaryNewsroom(MaiBotPlugin):
         # 素材可能是引用图片得到的「[图片：xxx]」，先展开成可写的现场描述。
         material, from_image = self._normalize_material(material)
         if from_image:
-            self.ctx.logger.info("素材来自图片，已展开为画面描述（长度=%s）", len(material))
+            self.ctx.logger.info(
+                "素材来自%s，已展开（长度=%s）",
+                "表情包" if self._last_material_kind == "emoji" else "图片",
+                len(material),
+            )
 
         # 空壳素材先尝试从 images 表把描述补回来：
         # 宿主有时来不及在入库前跑完识别，正文是空的，但描述已经写进表里了。
@@ -1482,6 +1489,13 @@ class ObituaryNewsroom(MaiBotPlugin):
         "也不要写成「这张图里……」的描述句——读者应该以为你在报道一个真实发生的现场。\n"
     )
 
+    _EMOJI_INSTRUCTION = (
+        "【这条素材是一张表情包的标签，不是画面描述】\n"
+        "标签代表的是**情绪与语境**，不是画面里真实存在的东西。\n"
+        "请依据这些情绪基调，合理想象一个与之相符的新闻场景来写，\n"
+        "**不要臆造具体人物的长相、穿着**，也不要写「表情包」「图片」这类字样。\n"
+    )
+
     def _build_prompt(
         self,
         material: str,
@@ -1492,7 +1506,12 @@ class ObituaryNewsroom(MaiBotPlugin):
         people = self.config.people
         extra = str(gen.extra_style or "").strip()
         extra_line = f"附加要求：{extra}" if extra else ""
-        image_block = self._IMAGE_INSTRUCTION if from_image else ""
+        if from_image:
+            image_block = (
+                self._EMOJI_INSTRUCTION if self._last_material_kind == "emoji" else self._IMAGE_INSTRUCTION
+            )
+        else:
+            image_block = ""
         # 素材里已经有死亡事件时，改成「替换死者」模式，不再另起转折句。
         template = _PROMPT_REPLACE if _material_has_death(material) else _PROMPT_RULES
         if _material_has_death(material):
@@ -2355,7 +2374,11 @@ class ObituaryNewsroom(MaiBotPlugin):
     # 宿主把图片转成 "[图片：xxx]" / "[表情包：xxx]" 塞进文本，
     # 引用图片当素材时会带这层壳。下面两个正则用来认出它。
     _IMAGE_MATERIAL_RE = re.compile(
-        r"^\s*[\[【]\s*(?:图片|图像|照片|表情包|image|img)\s*[:：]\s*(?P<desc>.+?)\s*[\]】]\s*$",
+        r"^\s*[\[【]\s*(?:图片|图像|照片|image|img)\s*[:：]\s*(?P<desc>.+?)\s*[\]】]\s*$",
+        re.IGNORECASE | re.DOTALL,
+    )
+    _EMOJI_MATERIAL_RE = re.compile(
+        r"^\s*[\[【]\s*(?:表情包|emoji)\s*[:：]\s*(?P<tags>.+?)\s*[\]】]\s*$",
         re.IGNORECASE | re.DOTALL,
     )
     _IMAGE_INLINE_RE = re.compile(
@@ -2407,6 +2430,33 @@ class ObituaryNewsroom(MaiBotPlugin):
             if desc:
                 return desc
         return ""
+
+    async def _image_record_by_hash(self, image_hash: str) -> Dict[str, Any]:
+        """按 hash 取整条 images 记录（含 image_type）。"""
+
+        value = str(image_hash or "").strip()
+        if not value:
+            return {}
+        query = getattr(self.ctx.db, "query", None)
+        if not callable(query):
+            return {}
+        try:
+            result = await query(
+                model_name="Images",
+                query_type="get",
+                filters={"image_hash": value},
+                limit=1,
+                single_result=True,
+            )
+        except Exception as exc:
+            self.ctx.logger.warning("按 hash 查图片记录失败：%s", exc)
+            return {}
+        if not isinstance(result, dict):
+            return {}
+        candidates = result.get("data") or result.get("result") or {}
+        if isinstance(candidates, list):
+            candidates = candidates[0] if candidates else {}
+        return candidates if isinstance(candidates, dict) else {}
 
     async def _recover_image_material(self, message: Any, stream_id: str) -> str:
         """引用图片但正文为空时，从 images 表把描述补回来。"""
@@ -2488,11 +2538,25 @@ class ObituaryNewsroom(MaiBotPlugin):
             self.ctx.logger.warning("图片恢复：ctx.db.query 不可用（缺少 database.query 能力？）")
             return ""
         for h in hashes:
-            desc = await self._image_description_by_hash(h)
-            if desc:
-                self.ctx.logger.info("从 images 表补回图片描述（长度=%s）", len(desc))
-                return f"[图片：{desc}]"
-        self.ctx.logger.warning("图片恢复：images 表里这些 hash 都没有描述：%s", [h[:12] for h in hashes])
+            record_data = await self._image_record_by_hash(h)
+            if not record_data:
+                continue
+            desc = str(record_data.get("description") or "").strip()
+            image_type = str(record_data.get("image_type") or "").strip().upper()
+            if not desc:
+                continue
+            if image_type == "EMOJI":
+                # 表情包只有一串标签（如「大笑,笑死,刷手机」），没有画面描述。
+                # 直接拿标签当画面会很怪，但完全丢掉又浪费了语义。
+                # 折中：把标签转成一句"这是一张表达××情绪的表情图"，让模型据此起稿。
+                tags = [t.strip() for t in desc.replace("，", ",").split(",") if t.strip()]
+                if not tags:
+                    continue
+                self.ctx.logger.info("从 images 表补回表情包标签：%s", tags)
+                return f"[表情包：{'、'.join(tags)}]"
+            self.ctx.logger.info("从 images 表补回图片描述（长度=%s）", len(desc))
+            return f"[图片：{desc}]"
+        self.ctx.logger.warning("图片恢复：images 表里这些 hash 都没有可用描述：%s", [h[:12] for h in hashes])
         return ""
 
     @classmethod
@@ -2515,8 +2579,19 @@ class ObituaryNewsroom(MaiBotPlugin):
         # "[表情包: 呆萌,可爱]" 这种带标签的，虽然不能当画面用，但至少有语义
         return False
 
+    def _normalize_material(self, material: str) -> Tuple[str, bool]:
+        """把图片/表情包素材展开成可写内容，并记录来源类型到 ``_last_material_kind``。"""
+
+        text, is_image = type(self)._normalize_material_impl(material)
+        if is_image:
+            lowered = str(material or "").lower()
+            self._last_material_kind = (
+                "emoji" if ("表情包" in str(material or "") or "emoji" in lowered) else "image"
+            )
+        return text, is_image
+
     @classmethod
-    def _normalize_material(cls, material: str) -> Tuple[str, bool]:
+    def _normalize_material_impl(cls, material: str) -> Tuple[str, bool]:
         """把「图片素材」展开成可写的事件描述。
 
         引用一张图片发命令时，素材实际是 ``[图片：一只橘猫趴在键盘上]``。
@@ -2531,6 +2606,15 @@ class ObituaryNewsroom(MaiBotPlugin):
         text = str(material or "").strip()
         if not text:
             return "", False
+
+        # 表情包只有标签，没有画面描述，必须走单独分支（先于图片判断）。
+        emoji_match = cls._EMOJI_MATERIAL_RE.match(text)
+        if emoji_match:
+            tags = str(emoji_match.group("tags") or "").strip()
+            if tags:
+                # 只返回标签本身，说明性文字放进提示词（见 _EMOJI_INSTRUCTION），
+                # 否则模型会把说明当素材抄进正文。
+                return tags, True
 
         match = cls._IMAGE_MATERIAL_RE.match(text)
         if match:
