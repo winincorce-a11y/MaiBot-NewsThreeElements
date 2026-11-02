@@ -1024,7 +1024,15 @@ class ObituaryNewsroom(MaiBotPlugin):
         if from_image:
             self.ctx.logger.info("素材来自图片，已展开为画面描述（长度=%s）", len(material))
 
-        # 空壳素材（例如表情包只给了 "[emoji]"）没有可写内容，写出来必然是编的。
+        # 空壳素材先尝试从 images 表把描述补回来：
+        # 宿主有时来不及在入库前跑完识别，正文是空的，但描述已经写进表里了。
+        if material and self._is_empty_shell(material) and message:
+            recovered = await self._recover_image_material(message, stream_id)
+            if recovered:
+                material, from_image = self._normalize_material(recovered)
+                self.ctx.logger.info("空壳素材已从图片描述恢复（长度=%s）", len(material))
+
+        # 仍然拿不到画面内容，写出来必然是编的。
         # 与其硬编一篇对不上的新闻，不如说清楚原因。
         # 注意：完全没给素材（裸命令）走下面的帮助分支，不在这里拦。
         if material and not names and self._is_empty_shell(material):
@@ -2359,6 +2367,96 @@ class ObituaryNewsroom(MaiBotPlugin):
         r"\s*[\]】］)）]?\s*$",
         re.IGNORECASE,
     )
+
+    # 宿主有时来不及在消息入库前跑完图片识别：
+    # processed_plain_text 是空的，引用时只剩占位符 ``[image]``，
+    # 但描述其实已经补进了 images 表。这里去把它捞回来。
+    _IMAGE_HASH_RE = re.compile(r"\bhash\b['\"]?\s*[:=]?\s*['\"]?(?P<hash>[0-9a-f]{32,128})", re.IGNORECASE)
+
+    async def _image_description_by_hash(self, image_hash: str) -> str:
+        """按图片 hash 查 images 表拿画面描述。"""
+
+        value = str(image_hash or "").strip()
+        if not value:
+            return ""
+        query = getattr(self.ctx.db, "query", None)
+        if not callable(query):
+            return ""
+        try:
+            result = await query(
+                model_name="Images",
+                query_type="get",
+                filters={"image_hash": value},
+                limit=1,
+                single_result=True,
+            )
+        except Exception as exc:
+            self.ctx.logger.warning("按 hash 查图片描述失败：%s", exc)
+            return ""
+        if not isinstance(result, dict):
+            return ""
+        candidates = result.get("data") or result.get("result") or []
+        if isinstance(candidates, dict):
+            candidates = [candidates]
+        for item in candidates if isinstance(candidates, list) else []:
+            if not isinstance(item, dict):
+                continue
+            desc = str(item.get("description") or "").strip()
+            if desc:
+                return desc
+        return ""
+
+    async def _recover_image_material(self, message: Any, stream_id: str) -> str:
+        """引用图片但正文为空时，从 images 表把描述补回来。"""
+
+        if not isinstance(message, dict):
+            return ""
+        # 1) 从 raw_message 的 reply 段拿被引用消息 ID
+        target_id = ""
+        for segment in message.get("raw_message") or []:
+            if not isinstance(segment, dict):
+                continue
+            if str(segment.get("type") or "").lower() != "reply":
+                continue
+            data = segment.get("data")
+            if isinstance(data, dict):
+                target_id = str(data.get("target_message_id") or "").strip()
+            if target_id:
+                break
+        if not target_id:
+            target_id = str(message.get("reply_to") or "").strip()
+        if not target_id:
+            return ""
+
+        # 2) 取被引用消息的原始结构，找图片 hash
+        try:
+            record = await self.ctx.message.get_by_id(target_id, chat_id=stream_id)
+        except Exception as exc:
+            self.ctx.logger.warning("取被引用消息失败：id=%s err=%s", target_id, exc)
+            return ""
+        if not isinstance(record, dict):
+            return ""
+        hashes: List[str] = []
+        for segment in record.get("raw_message") or []:
+            if not isinstance(segment, dict):
+                continue
+            if str(segment.get("type") or "").lower() not in {"image", "emoji"}:
+                continue
+            data = segment.get("data")
+            if isinstance(data, dict):
+                h = str(data.get("hash") or "").strip()
+                if h:
+                    hashes.append(h)
+        if not hashes:
+            return ""
+
+        # 3) 按 hash 查描述
+        for h in hashes:
+            desc = await self._image_description_by_hash(h)
+            if desc:
+                self.ctx.logger.info("从 images 表补回图片描述（长度=%s）", len(desc))
+                return f"[图片：{desc}]"
+        return ""
 
     @classmethod
     def _is_empty_shell(cls, material: str) -> bool:

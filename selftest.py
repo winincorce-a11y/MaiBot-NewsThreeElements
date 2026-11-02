@@ -1752,8 +1752,78 @@ async def main() -> int:
     assert llm70.prompts, "带名单时应照常生成"
     print("[70] 空壳 + 自定义名单仍可出稿 OK")
 
+
+    # ── 71. 空壳素材从 images 表恢复描述 ──
+    # 真实事故：宿主来不及在入库前跑完图片识别，processed_plain_text 是空的，
+    # 引用时只剩 "[image]"，但描述其实已经在 images 表里（vlm_processed=1）。
+    class _FakeDB:
+        def __init__(self, mapping): self.mapping = mapping
+        async def query(self, model_name, query_type="get", filters=None, limit=None,
+                        single_result=False):
+            h = (filters or {}).get("image_hash", "")
+            desc = self.mapping.get(h, "")
+            return {"success": True, "data": {"description": desc} if desc else None}
+
+    class _FakeMsgWithHash:
+        def __init__(self, mapping): self.mapping = mapping
+        async def get_by_id(self, mid, chat_id="", **kw):
+            return {
+                "message_id": mid,
+                "raw_message": [{"type": "image", "data": {"hash": "abc123def456"}}],
+                "processed_plain_text": "",
+            }
+
+    mapping71 = {"abc123def456": "一只橘猫趴在键盘上，桌上有半杯咖啡"}
+    ctx71 = build_ctx(FakeLLM("x"))
+    ctx71.db = _FakeDB(mapping71)
+    ctx71.message = _FakeMsgWithHash(mapping71)
+    plugin71 = make_plugin(module, ctx71)
+
+    msg71 = {"raw_message": [
+        {"type": "reply", "data": {"target_message_id": "m1", "target_message_content": "[image]"}},
+    ]}
+    recovered = await plugin71._recover_image_material(msg71, "s")
+    assert recovered == "[图片：一只橘猫趴在键盘上，桌上有半杯咖啡]", f"恢复失败：{recovered!r}"
+    print("[71] 从 images 表恢复图片描述 OK")
+
+    # 查不到描述时返回空（不编造）
+    ctx72 = build_ctx(FakeLLM("x"))
+    ctx72.db = _FakeDB({})
+    ctx72.message = _FakeMsgWithHash({})
+    plugin72 = make_plugin(module, ctx72)
+    assert await plugin72._recover_image_material(msg71, "s") == "", "查不到时应返回空"
+    print("[72] 表里没有描述时不编造 OK")
+
+    # 端到端：空壳 + 表里有描述 -> 正常出稿
+    art73 = (
+        "某地一家游戏公司的开发间里，屏幕上正在调试一款格斗小游戏，"
+        "两个黄色圆润角色对峙，界面显示血量与计时。值得注意的是，据通报，"
+        "维亚切斯拉夫·巴兰尼科夫在调试中因设备故障身亡；"
+        "安东·尤丁采夫在排查线路时遇难；尼基塔·布亚诺夫突发疾病不治。"
+    )
+    llm73 = FakeLLM(art73)
+    ctx73 = build_ctx(llm73)
+    ctx73.db = _FakeDB(mapping71)
+    ctx73.message = _FakeMsgWithHash(mapping71)
+    plugin73 = make_plugin(module, ctx73)
+    ok73, reason73, _ = await plugin73.handle_news_command(**{
+        "text": "/新闻三要素",
+        "stream_id": "c58628a91bab2b87117e274bd85f05fa",
+        "platform": "qq",
+        "matched_groups": {"material": ""},
+        "message": msg71,
+        "user_id": "u",
+        "is_local_operator": False,
+        "plugin_config": {},
+    })
+    assert ok73, f"应成功：{reason73}"
+    assert llm73.prompts, "应从表里补到描述并调用模型"
+    assert "橘猫趴在键盘上" in llm73.prompts[0], "补回的描述应进提示词"
+    print("[73] 空壳恢复后端到端出稿 OK")
+
     print("\n全部自检通过 ✅")
     return 0
+
 
 
 
