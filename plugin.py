@@ -14,6 +14,7 @@
 - ``message.get_by_id`` 读取被引用消息作为素材
 """
 
+import base64
 import hashlib
 import json
 import random
@@ -1031,16 +1032,40 @@ class ObituaryNewsroom(MaiBotPlugin):
                 len(material),
             )
 
-        # 空壳素材先尝试从 images 表把描述补回来：
-        # 宿主有时来不及在入库前跑完识别，正文是空的，但描述已经写进表里了。
+        # 引用消息时，**不管有没有写素材**都去取一次图片内容：
+        # 用户可能既引用了图片、又在命令后面补了文字说明，
+        # 两者应该结合，而不是让文字把图片盖掉。
         #
-        # 注意这里**不能**要求 material 非空：引用场景下 material 常被剥成空串
-        # （命令本身没有附素材），那恰恰是最需要去表里捞的时候。
-        if message and self._is_empty_shell(material):
+        # 注意这里不能要求 material 非空：引用场景下 material 常被剥成空串，
+        # 那恰恰是最需要去表里捞的时候。
+        if message and self._has_quote(message, text):
             recovered = await self._recover_image_material(message, stream_id)
             if recovered:
-                material, from_image = self._normalize_material(recovered)
-                self.ctx.logger.info("空壳素材已从图片描述恢复（长度=%s）", len(material))
+                image_text, _img_flag = self._normalize_material(recovered)
+                image_kind = self._last_material_kind == "emoji"
+                if image_text:
+                    if material and not self._is_empty_shell(material):
+                        # 文字素材 + 图片：两者结合，图片作为现场依据。
+                        # 图片描述本身可能已带句末标点，先去掉再拼，避免出现「。。」
+                        scene = image_text.rstrip("。．.！!；;，, ")
+                        material = (
+                            f"{material}\n\n"
+                            f"（另附一张现场图片，画面内容：{scene}。"
+                            "请把文字描述与画面内容结合起来写同一条新闻。）"
+                        )
+                        self.ctx.logger.info(
+                            "文字素材与图片已合并（文字=%s 字，画面=%s 字）",
+                            len(material),
+                            len(image_text),
+                        )
+                    else:
+                        material = image_text
+                        from_image = True
+                        self.ctx.logger.info(
+                            "空壳素材已从%s恢复（长度=%s）",
+                            "表情包标签" if image_kind else "图片描述",
+                            len(material),
+                        )
 
         # 仍然拿不到画面内容，写出来必然是编的。
         # 与其硬编一篇对不上的新闻，不如说清楚原因。
@@ -1838,6 +1863,129 @@ class ObituaryNewsroom(MaiBotPlugin):
             return bool(profile["lead_in"])
         return bool(self.config.output.lead_in)
 
+    # 读图片文件后转 base64 的大小上限（base64 会膨胀约 1/3）。
+    _MAX_IMAGE_BYTES = 4 * 1024 * 1024
+    _IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+
+    def _mbot_root(self) -> Optional[Path]:
+        """推断 MaiBot 根目录。
+
+        ``ctx.paths.data_dir`` 是 ``<root>/data/plugins/<plugin_id>``，
+        向上两级即 ``<root>/data``，再向上一级就是 ``<root>``。
+        """
+
+        try:
+            data_dir = Path(self.ctx.paths.data_dir).resolve()
+        except Exception:
+            return None
+        # .../data/plugins/<id> -> .../data/plugins -> .../data -> root
+        for candidate in (data_dir.parent.parent, data_dir.parent, data_dir):
+            if (candidate / "data").is_dir() or (candidate / "MaiBot.db").exists():
+                return candidate
+        return data_dir.parent.parent.parent if len(data_dir.parents) >= 3 else None
+
+    def _find_image_file(self, image_hash: str, full_path: str = "") -> Optional[Path]:
+        """按 hash 找到磁盘上的图片文件。"""
+
+        h = str(image_hash or "").strip()
+        if not h:
+            return None
+        roots: List[Path] = []
+        root = self._mbot_root()
+        if root is not None:
+            roots.append(root)
+        try:
+            roots.append(Path(self.ctx.paths.data_dir).resolve().parent.parent.parent)
+        except Exception:
+            pass
+
+        # 1) 数据库里记的 full_path（相对 MaiBot 根目录）
+        rel = str(full_path or "").strip()
+        if rel:
+            for base in roots:
+                for candidate in (base / rel, base / "data" / rel):
+                    try:
+                        if candidate.is_file():
+                            return candidate
+                    except OSError:
+                        continue
+
+        # 2) 按常见目录 + hash 兜底搜索
+        for base in roots:
+            for sub in ("data/images", "data/emoji"):
+                folder = base / sub
+                try:
+                    if not folder.is_dir():
+                        continue
+                except OSError:
+                    continue
+                for suffix in self._IMAGE_SUFFIXES:
+                    candidate = folder / f"{h}{suffix}"
+                    try:
+                        if candidate.is_file():
+                            return candidate
+                    except OSError:
+                        continue
+        return None
+
+    async def _recognize_image(self, image_hash: str, full_path: str = "") -> str:
+        """直接调视觉模型识别图片，返回画面描述。
+
+        宿主的图片描述只在入库时生成一次，没跑到就再也不会补；
+        而宿主的 ``llm.generate`` 其实支持多模态输入（``prompt`` 可传消息列表），
+        图片片段用 ``{"type": "image", "image_format": ..., "image_base64": ...}``。
+        所以插件自己读文件、自己送识别。
+        """
+
+        path = self._find_image_file(image_hash, full_path)
+        if path is None:
+            self.ctx.logger.warning("图片识别：找不到图片文件 hash=%s", str(image_hash)[:16])
+            return ""
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            self.ctx.logger.warning("图片识别：读取文件失败 %s (%s)", path, exc)
+            return ""
+        if not raw or len(raw) > self._MAX_IMAGE_BYTES:
+            self.ctx.logger.warning("图片识别：文件过大或为空 %s bytes", len(raw))
+            return ""
+
+        suffix = path.suffix.lower().lstrip(".")
+        image_format = "jpeg" if suffix in {"jpg", "jpeg"} else (suffix or "png")
+        encoded = base64.b64encode(raw).decode("ascii")
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "请用中文客观描述这张图片的内容，供后续写新闻使用。\n"
+                            "要求：说清画面主体、场景、关键文字与细节；只描述看得见的东西，"
+                            "不要评论、不要猜测情绪；控制在 150 字以内，直接输出描述本身。"
+                        ),
+                    },
+                    {"type": "image", "image_format": image_format, "image_base64": encoded},
+                ],
+            }
+        ]
+        try:
+            result = await self.ctx.llm.generate(messages, task_name="vlm", max_tokens=800)
+        except Exception as exc:
+            self.ctx.logger.warning("图片识别：调用视觉模型失败 %s", exc)
+            return ""
+        if not isinstance(result, dict) or not result.get("success"):
+            self.ctx.logger.warning(
+                "图片识别：视觉模型返回失败 %s",
+                (result or {}).get("error") if isinstance(result, dict) else result,
+            )
+            return ""
+        text = str(result.get("response") or "").strip()
+        if text:
+            self.ctx.logger.info("图片识别成功（%s 字）：%s", len(text), text[:60])
+        return text
+
     def _no_picture_hint(self, message: Any) -> str:
         """引用图片但拿不到画面内容时的提示。
 
@@ -2550,10 +2698,20 @@ class ObituaryNewsroom(MaiBotPlugin):
             return ""
         for h in hashes:
             record_data = await self._image_record_by_hash(h)
-            if not record_data:
-                continue
             desc = str(record_data.get("description") or "").strip()
             image_type = str(record_data.get("image_type") or "").strip().upper()
+            full_path = str(record_data.get("full_path") or "").strip()
+
+            # 表里没有画面描述时，自己调视觉模型识别。
+            # 宿主的描述只在入库时生成一次，没跑到就不会补，插件只能自食其力。
+            if not desc or image_type == "EMOJI":
+                own = await self._recognize_image(h, full_path)
+                if own:
+                    self.ctx.logger.info("用自建识别补上画面描述（hash=%s）", h[:12])
+                    return f"[图片：{own}]"
+
+            if not record_data:
+                continue
             if not desc:
                 continue
             if image_type == "EMOJI":

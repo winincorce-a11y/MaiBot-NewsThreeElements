@@ -1830,8 +1830,92 @@ async def main() -> int:
     assert "橘猫趴在键盘上" in llm73.prompts[0], "补回的描述应进提示词"
     print("[73] 空壳恢复后端到端出稿 OK")
 
+
+    # ── 74. 引用图片 + 文字素材：两者必须结合（不能只取文字） ──
+    # 真实问题：命令后写了素材时，图片会被文字盖掉。
+    IMG_HASH = "abc123def456"
+    mapping74 = {IMG_HASH: "画面里两个黄色角色在屏幕上对峙，配有血条和计时"}
+
+    def _mk74():
+        class _DB:
+            async def query(self, model_name, query_type="get", filters=None, limit=None,
+                            single_result=False):
+                h = (filters or {}).get("image_hash", "")
+                d = mapping74.get(h, "")
+                return {"description": d, "image_type": "IMAGE"} if d else None
+
+        class _Msg:
+            async def get_by_id(self, mid, chat_id="", **kw):
+                return {"success": True, "message": {
+                    "raw_message": [{"type": "image", "data": "", "hash": IMG_HASH}],
+                    "processed_plain_text": "",
+                }}
+
+        llm = FakeLLM(
+            "某项目团队本周开展版本联调，准备上线。值得注意的是，据通报，"
+            "甲一在连续联调后突发疾病身亡；乙二在赶赴现场途中遇难；丙三在调试设备时意外离世。"
+        )
+        c74 = build_ctx(llm)
+        c74.db = _DB()
+        c74.message = _Msg()
+        p74 = make_plugin(module, c74)
+        return p74, llm, c74
+
+    # 只给名单 + 引用图片：素材应来自图片
+    p74a, llm74a, _ = _mk74()
+    await p74a.handle_news_command(**{
+        "text": "/新闻三要素 （甲一，乙二，丙三）",
+        "stream_id": "c58628a91bab2b87117e274bd85f05fa",
+        "platform": "qq",
+        "matched_groups": {"material": "（甲一，乙二，丙三）"},
+        "message": {"raw_message": [{"type": "reply", "data": {"target_message_id": "1"}}]},
+        "user_id": "u", "is_local_operator": False, "plugin_config": {},
+    })
+    pr74a = llm74a.prompts[0]
+    assert "黄色角色" in pr74a, "只给名单时应采用图片内容"
+    assert "甲一" in pr74a and "乙二" in pr74a, "名单应生效"
+    print("[74] 引用图片 + 只给名单 OK（素材来自图片，名单生效）")
+
+    # 文字素材 + 名单 + 引用图片：三者都要在提示词里
+    p74b, llm74b, _ = _mk74()
+    cmd74 = "某项目团队本周开展版本联调，准备上线"
+    await p74b.handle_news_command(**{
+        "text": f"/新闻三要素 {cmd74} （甲一，乙二，丙三）",
+        "stream_id": "1a8eaba25d74b54702ecc69805c231e7",
+        "platform": "qq",
+        "matched_groups": {"material": f"{cmd74} （甲一，乙二，丙三）"},
+        "message": {"raw_message": [{"type": "reply", "data": {"target_message_id": "1"}}]},
+        "user_id": "u", "is_local_operator": False, "plugin_config": {},
+    })
+    pr74b = llm74b.prompts[0]
+    assert cmd74 in pr74b, f"文字素材应保留：{pr74b[:300]!r}"
+    assert "黄色角色" in pr74b, f"图片内容也应保留（两者结合）：{pr74b[:300]!r}"
+    assert "甲一" in pr74b and "丙三" in pr74b, "名单应生效"
+    material_block74 = pr74b.split("【素材】")[1].split("【硬性要求】")[0]
+    assert "结合起来" in material_block74, f"应明确要求结合：{material_block74[:200]!r}"
+    if "。。" in pr74b:
+        raise AssertionError("合并时不该出现重复句号")
+    print("[75] 引用图片 + 文字素材 + 名单 OK（三者结合，无重复标点）")
+
+    # ── 76. 引用图片时的名单替换（专项确认） ──
+    p76, llm76, _ = _mk76 = _mk74()
+    await p76.handle_news_command(**{
+        "text": "/新闻三要素 （张三，李四）",
+        "stream_id": "aa11bb22cc33dd44ee55ff66",
+        "platform": "qq",
+        "matched_groups": {"material": "（张三，李四）"},
+        "message": {"raw_message": [{"type": "reply", "data": {"target_message_id": "1"}}]},
+        "user_id": "u", "is_local_operator": False, "plugin_config": {},
+    })
+    pr76 = llm76.prompts[0]
+    assert "死亡名单共 **2 人**" in pr76, f"应为 2 人：{pr76[:400]!r}"
+    assert "张三" in pr76 and "李四" in pr76, "名单应替换"
+    assert "巴兰尼科夫" not in pr76, "默认三人不该出现"
+    print("[76] 引用图片时名单替换 OK（2 人，默认三人不出现）")
+
     print("\n全部自检通过 ✅")
     return 0
+
 
 
 
