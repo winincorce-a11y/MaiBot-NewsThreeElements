@@ -1047,10 +1047,8 @@ class ObituaryNewsroom(MaiBotPlugin):
         if not names and self._has_quote(message, text) and self._is_empty_shell(material):
             self.ctx.logger.warning("素材为空壳标记，拒绝出稿：%r", material[:60])
             await self.ctx.send.text(
-                "这张图我没能读取出画面内容（宿主只给了空标记，通常是表情包或识别没跑完），"
-                "硬写会变成瞎编。\n"
-                "可以试试：换一张图，或直接把素材打出来 —— /新闻三要素 <素材>",
-                self._sanitize_stream_id(stream_id) or stream_id,
+                self._no_picture_hint(message),
+                self._sanitize_stream_id(stream_id) or self._last_stream_id or stream_id,
             )
             return True, "图片无可读内容", True
 
@@ -1839,6 +1837,36 @@ class ObituaryNewsroom(MaiBotPlugin):
         if "lead_in" in profile:
             return bool(profile["lead_in"])
         return bool(self.config.output.lead_in)
+
+    def _no_picture_hint(self, message: Any) -> str:
+        """引用图片但拿不到画面内容时的提示。
+
+        宿主对表情包只记情绪标签、不做视觉识别；
+        普通图片若入库时 VLM 没跑（``vlm_processed=0`` 且 ``description`` 为空），
+        之后也没有补跑机制。插件既不能读二进制、也不能自己调视觉模型，
+        只能如实说明并给出可执行的替代做法。
+        """
+
+        shell = ""
+        if isinstance(message, dict):
+            for segment in message.get("raw_message") or []:
+                if isinstance(segment, dict) and str(segment.get("type") or "").lower() == "reply":
+                    data = segment.get("data")
+                    if isinstance(data, dict):
+                        shell = str(data.get("target_message_content") or "").strip()
+                        break
+
+        if "emoji" in shell.lower() or "表情包" in shell:
+            head = "你引用的这条是表情包，宿主的表情包链路只记情绪标签、不做画面识别，所以拿不到画面内容。"
+            tips = "可以直接把想要的场景打出来：/新闻三要素 直播现场一群人刷手机围观"
+        else:
+            head = "这张图在入库时没跑识别（宿主的视觉模型当时没处理），之后没有补跑机制，所以拿不到画面内容。"
+            tips = (
+                "两个办法：\n"
+                "· 把图重新发一次再引用（通常会触发识别）；\n"
+                "· 或者直接把素材打出来：/新闻三要素 <素材>"
+            )
+        return f"{head}\n硬写会变成瞎编，所以这次没生成。\n{tips}"
 
     def _pick_verb(self) -> str:
         """从 ``ending.verbs`` 里随机挑一个词；空列表回落到「作哀」。"""

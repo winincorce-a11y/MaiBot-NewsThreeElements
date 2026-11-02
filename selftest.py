@@ -1727,7 +1727,8 @@ async def main() -> int:
     assert ok69
     assert sent_all(ctx69), "应给出提示"
     tip = sent_body(ctx69)
-    assert "没能读取出画面内容" in tip or "瞎编" in tip, f"应说明取不到画面：{tip[:60]!r}"
+    assert "瞎编" in tip, f"应说明硬写会瞎编：{tip[:60]!r}"
+    assert "表情包" in tip, f"表情包应单独说明：{tip[:80]!r}"
     assert not llm69.prompts, f"空壳素材不该调用模型硬编：{len(llm69.prompts)} 次"
     print("[69] 空壳素材拦截 OK（不调用模型，直接说明原因）")
 
