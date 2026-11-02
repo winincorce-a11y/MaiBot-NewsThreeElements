@@ -1767,10 +1767,16 @@ async def main() -> int:
     class _FakeMsgWithHash:
         def __init__(self, mapping): self.mapping = mapping
         async def get_by_id(self, mid, chat_id="", **kw):
+            # 复刻宿主真实结构：
+            #   1) 外面包一层 {"success":..., "message": {...}}
+            #   2) hash 在消息段的**顶层**，不在 data 里
             return {
-                "message_id": mid,
-                "raw_message": [{"type": "image", "data": {"hash": "abc123def456"}}],
-                "processed_plain_text": "",
+                "success": True,
+                "message": {
+                    "message_id": mid,
+                    "raw_message": [{"type": "image", "data": "", "hash": "abc123def456"}],
+                    "processed_plain_text": "",
+                },
             }
 
     mapping71 = {"abc123def456": "一只橘猫趴在键盘上，桌上有半杯咖啡"}

@@ -1026,7 +1026,10 @@ class ObituaryNewsroom(MaiBotPlugin):
 
         # 空壳素材先尝试从 images 表把描述补回来：
         # 宿主有时来不及在入库前跑完识别，正文是空的，但描述已经写进表里了。
-        if material and self._is_empty_shell(material) and message:
+        #
+        # 注意这里**不能**要求 material 非空：引用场景下 material 常被剥成空串
+        # （命令本身没有附素材），那恰恰是最需要去表里捞的时候。
+        if message and self._is_empty_shell(material):
             recovered = await self._recover_image_material(message, stream_id)
             if recovered:
                 material, from_image = self._normalize_material(recovered)
@@ -1034,8 +1037,7 @@ class ObituaryNewsroom(MaiBotPlugin):
 
         # 仍然拿不到画面内容，写出来必然是编的。
         # 与其硬编一篇对不上的新闻，不如说清楚原因。
-        # 注意：完全没给素材（裸命令）走下面的帮助分支，不在这里拦。
-        if material and not names and self._is_empty_shell(material):
+        if not names and self._has_quote(message, text) and self._is_empty_shell(material):
             self.ctx.logger.warning("素材为空壳标记，拒绝出稿：%r", material[:60])
             await self.ctx.send.text(
                 "这张图我没能读取出画面内容（宿主只给了空标记，通常是表情包或识别没跑完），"
@@ -2426,15 +2428,35 @@ class ObituaryNewsroom(MaiBotPlugin):
         if not target_id:
             target_id = str(message.get("reply_to") or "").strip()
         if not target_id:
+            self.ctx.logger.warning("图片恢复：拿不到被引用消息 ID")
             return ""
 
         # 2) 取被引用消息的原始结构，找图片 hash
+        get_by_id = getattr(self.ctx.message, "get_by_id", None)
+        if not callable(get_by_id):
+            self.ctx.logger.warning("图片恢复：ctx.message.get_by_id 不可用")
+            return ""
         try:
-            record = await self.ctx.message.get_by_id(target_id, chat_id=stream_id)
+            record = await get_by_id(target_id, chat_id=stream_id)
         except Exception as exc:
-            self.ctx.logger.warning("取被引用消息失败：id=%s err=%s", target_id, exc)
+            self.ctx.logger.warning("图片恢复：取被引用消息失败 id=%s err=%s", target_id, exc)
             return ""
         if not isinstance(record, dict):
+            self.ctx.logger.warning(
+                "图片恢复：被引用消息取不回来 id=%s 返回类型=%s", target_id, type(record).__name__
+            )
+            return ""
+
+        # 宿主 message.get_by_id 返回的是包了一层的结构：
+        #   {"success": True, "message": {...实际消息...}}
+        # 直接拿外层会取不到 raw_message。
+        inner = record.get("message")
+        if isinstance(inner, dict):
+            record = inner
+        elif record.get("success") is False:
+            self.ctx.logger.warning(
+                "图片恢复：get_by_id 失败 id=%s err=%s", target_id, record.get("error")
+            )
             return ""
         hashes: List[str] = []
         for segment in record.get("raw_message") or []:
@@ -2442,20 +2464,35 @@ class ObituaryNewsroom(MaiBotPlugin):
                 continue
             if str(segment.get("type") or "").lower() not in {"image", "emoji"}:
                 continue
-            data = segment.get("data")
-            if isinstance(data, dict):
-                h = str(data.get("hash") or "").strip()
-                if h:
-                    hashes.append(h)
+            # 宿主序列化时 hash 在**段的顶层**：
+            #   {"type": "image", "data": <content>, "hash": <binary_hash>}
+            # （见 PluginMessageUtils 的 ImageComponent / EmojiComponent 分支），
+            # 不在 data 里。data 通常是 content 字符串。
+            h = str(segment.get("hash") or "").strip()
+            if not h:
+                data = segment.get("data")
+                if isinstance(data, dict):
+                    h = str(data.get("hash") or "").strip()
+            if h:
+                hashes.append(h)
         if not hashes:
+            self.ctx.logger.warning(
+                "图片恢复：被引用消息里没有图片 hash，raw 段类型=%s",
+                [str(s.get("type")) for s in (record.get("raw_message") or []) if isinstance(s, dict)],
+            )
             return ""
 
         # 3) 按 hash 查描述
+        db_query = getattr(getattr(self.ctx, "db", None), "query", None)
+        if not callable(db_query):
+            self.ctx.logger.warning("图片恢复：ctx.db.query 不可用（缺少 database.query 能力？）")
+            return ""
         for h in hashes:
             desc = await self._image_description_by_hash(h)
             if desc:
                 self.ctx.logger.info("从 images 表补回图片描述（长度=%s）", len(desc))
                 return f"[图片：{desc}]"
+        self.ctx.logger.warning("图片恢复：images 表里这些 hash 都没有描述：%s", [h[:12] for h in hashes])
         return ""
 
     @classmethod
