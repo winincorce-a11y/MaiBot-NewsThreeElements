@@ -1878,10 +1878,16 @@ class ObituaryNewsroom(MaiBotPlugin):
             data_dir = Path(self.ctx.paths.data_dir).resolve()
         except Exception:
             return None
-        # .../data/plugins/<id> -> .../data/plugins -> .../data -> root
-        for candidate in (data_dir.parent.parent, data_dir.parent, data_dir):
-            if (candidate / "data").is_dir() or (candidate / "MaiBot.db").exists():
-                return candidate
+        # data_dir 形如 <root>/data/plugins/<plugin_id>，
+        # 需要的是 <root>（含 data/ 与 MaiBot.db 的那一层），
+        # 所以从 data_dir 逐级向上找，**取最外层**满足条件的目录。
+        found: Optional[Path] = None
+        for candidate in [data_dir, *data_dir.parents]:
+            if (candidate / "data").is_dir() and (candidate / "MaiBot.db").exists():
+                found = candidate
+        if found is not None:
+            return found
+        # 兜底：按固定层级回推
         return data_dir.parent.parent.parent if len(data_dir.parents) >= 3 else None
 
     def _find_image_file(self, image_hash: str, full_path: str = "") -> Optional[Path]:
